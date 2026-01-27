@@ -68,13 +68,20 @@ export async function sendChatMessage(
   if (msg) {
     contentBlocks.push({ type: "text", text: msg });
   }
-  // Add image previews to the message for display
+  // Add image previews to the message for display (skip non-image files)
   if (hasAttachments) {
     for (const att of attachments) {
-      contentBlocks.push({
-        type: "image",
-        source: { type: "base64", media_type: att.mimeType, data: att.dataUrl },
-      });
+      if (att.isFile) {
+        contentBlocks.push({
+          type: "text",
+          text: `📎 ${att.fileName ?? "file"}`,
+        });
+      } else {
+        contentBlocks.push({
+          type: "image",
+          source: { type: "base64", media_type: att.mimeType, data: att.dataUrl },
+        });
+      }
     }
   }
 

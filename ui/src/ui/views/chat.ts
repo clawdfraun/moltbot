@@ -102,6 +102,23 @@ function generateAttachmentId(): string {
   return `att-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
 
+function readFileAsAttachment(file: File, onChange: (attachments: ChatAttachment[]) => void, current: ChatAttachment[]) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    const dataUrl = reader.result as string;
+    const isImage = file.type.startsWith("image/");
+    const newAttachment: ChatAttachment = {
+      id: generateAttachmentId(),
+      dataUrl,
+      mimeType: file.type || "application/octet-stream",
+      fileName: file.name,
+      isFile: !isImage,
+    };
+    onChange([...current, newAttachment]);
+  };
+  reader.readAsDataURL(file);
+}
+
 function handlePaste(
   e: ClipboardEvent,
   props: ChatProps,
@@ -109,35 +126,70 @@ function handlePaste(
   const items = e.clipboardData?.items;
   if (!items || !props.onAttachmentsChange) return;
 
-  const imageItems: DataTransferItem[] = [];
+  const fileItems: DataTransferItem[] = [];
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
-    if (item.type.startsWith("image/")) {
-      imageItems.push(item);
+    if (item.kind === "file") {
+      fileItems.push(item);
     }
   }
 
-  if (imageItems.length === 0) return;
+  if (fileItems.length === 0) return;
 
-  e.preventDefault();
+  // Only prevent default if we have image items (preserve text paste)
+  const hasImages = fileItems.some((item) => item.type.startsWith("image/"));
+  if (hasImages) e.preventDefault();
 
-  for (const item of imageItems) {
+  const current = props.attachments ?? [];
+  for (const item of fileItems) {
     const file = item.getAsFile();
     if (!file) continue;
-
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = reader.result as string;
-      const newAttachment: ChatAttachment = {
-        id: generateAttachmentId(),
-        dataUrl,
-        mimeType: file.type,
-      };
-      const current = props.attachments ?? [];
-      props.onAttachmentsChange?.([...current, newAttachment]);
-    };
-    reader.readAsDataURL(file);
+    readFileAsAttachment(file, props.onAttachmentsChange, current);
   }
+}
+
+function handleDrop(
+  e: DragEvent,
+  props: ChatProps,
+) {
+  e.preventDefault();
+  e.stopPropagation();
+  if (!props.onAttachmentsChange) return;
+
+  const files = e.dataTransfer?.files;
+  if (!files || files.length === 0) return;
+
+  const current = props.attachments ?? [];
+  for (let i = 0; i < files.length; i++) {
+    readFileAsAttachment(files[i], props.onAttachmentsChange!, current);
+  }
+}
+
+function handleDragOver(e: DragEvent) {
+  e.preventDefault();
+  e.stopPropagation();
+}
+
+function openFilePicker(props: ChatProps) {
+  if (!props.onAttachmentsChange) return;
+  const input = document.createElement("input");
+  input.type = "file";
+  input.multiple = true;
+  input.onchange = () => {
+    const files = input.files;
+    if (!files) return;
+    const current = props.attachments ?? [];
+    for (let i = 0; i < files.length; i++) {
+      readFileAsAttachment(files[i], props.onAttachmentsChange!, current);
+    }
+  };
+  input.click();
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function renderAttachmentPreview(props: ChatProps) {
@@ -148,12 +200,21 @@ function renderAttachmentPreview(props: ChatProps) {
     <div class="chat-attachments">
       ${attachments.map(
         (att) => html`
-          <div class="chat-attachment">
-            <img
-              src=${att.dataUrl}
-              alt="Attachment preview"
-              class="chat-attachment__img"
-            />
+          <div class="chat-attachment ${att.isFile ? "chat-attachment--file" : ""}">
+            ${att.isFile
+              ? html`
+                  <div class="chat-attachment__file-info">
+                    <span class="chat-attachment__file-icon">${icons.paperclip}</span>
+                    <span class="chat-attachment__file-name">${att.fileName || "file"}</span>
+                  </div>
+                `
+              : html`
+                  <img
+                    src=${att.dataUrl}
+                    alt="Attachment preview"
+                    class="chat-attachment__img"
+                  />
+                `}
             <button
               class="chat-attachment__remove"
               type="button"
@@ -191,8 +252,8 @@ export function renderChat(props: ChatProps) {
   const hasAttachments = (props.attachments?.length ?? 0) > 0;
   const composePlaceholder = props.connected
     ? hasAttachments
-      ? "Add a message or paste more images..."
-      : "Message (↩ to send, Shift+↩ for line breaks, paste images)"
+      ? "Add a message or attach more files..."
+      : "Message (↩ to send, Shift+↩ for line breaks, paste or drop files)"
     : "Connect to the gateway to start chatting…";
 
   const splitRatio = props.splitRatio ?? 0.6;
@@ -321,9 +382,22 @@ export function renderChat(props: ChatProps) {
           `
         : nothing}
 
-      <div class="chat-compose">
+      <div class="chat-compose"
+        @drop=${(e: DragEvent) => handleDrop(e, props)}
+        @dragover=${handleDragOver}
+      >
         ${renderAttachmentPreview(props)}
         <div class="chat-compose__row">
+          <button
+            class="btn chat-compose__attach"
+            type="button"
+            title="Attach file"
+            aria-label="Attach file"
+            ?disabled=${!props.connected}
+            @click=${() => openFilePicker(props)}
+          >
+            ${icons.paperclip}
+          </button>
           <label class="field chat-compose__field">
             <span>Message</span>
             <textarea

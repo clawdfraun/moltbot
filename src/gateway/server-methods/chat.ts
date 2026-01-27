@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { CURRENT_SESSION_VERSION } from "@mariozechner/pi-coding-agent";
-import { resolveSessionAgentId } from "../../agents/agent-scope.js";
+import { resolveAgentWorkspaceDir, resolveSessionAgentId } from "../../agents/agent-scope.js";
 import { resolveEffectiveMessagesConfig, resolveIdentityName } from "../../agents/identity.js";
 import { resolveThinkingDefault } from "../../agents/model-selection.js";
 import { resolveAgentTimeoutMs } from "../../agents/timeout.js";
@@ -347,13 +347,28 @@ export const chatHandlers: GatewayRequestHandlers = {
       );
       return;
     }
+    const { cfg, entry } = loadSessionEntry(p.sessionKey);
+
     let parsedMessage = p.message;
     let parsedImages: ChatImageContent[] = [];
     if (normalizedAttachments.length > 0) {
+      // Resolve workspace path for saving non-image file attachments
+      let workspacePath: string | undefined;
+      try {
+        const agentId = resolveSessionAgentId({
+          sessionKey: p.sessionKey,
+          config: cfg,
+        });
+        workspacePath = resolveAgentWorkspaceDir(cfg, agentId);
+      } catch {
+        // workspace resolution is best-effort; images still work without it
+      }
+
       try {
         const parsed = await parseMessageWithAttachments(p.message, normalizedAttachments, {
           maxBytes: 5_000_000,
           log: context.logGateway,
+          workspacePath,
         });
         parsedMessage = parsed.message;
         parsedImages = parsed.images;
@@ -362,7 +377,6 @@ export const chatHandlers: GatewayRequestHandlers = {
         return;
       }
     }
-    const { cfg, entry } = loadSessionEntry(p.sessionKey);
     const timeoutMs = resolveAgentTimeoutMs({
       cfg,
       overrideMs: p.timeoutMs,

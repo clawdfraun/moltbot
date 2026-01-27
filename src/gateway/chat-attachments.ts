@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { detectMime } from "../media/mime.js";
 
 export type ChatAttachment = {
@@ -13,9 +16,17 @@ export type ChatImageContent = {
   mimeType: string;
 };
 
+export type SavedFileAttachment = {
+  filePath: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+};
+
 export type ParsedMessageWithImages = {
   message: string;
   images: ChatImageContent[];
+  files: SavedFileAttachment[];
 };
 
 type AttachmentLog = {
@@ -53,18 +64,61 @@ function isImageMime(mime?: string): boolean {
  * Returns the message text and an array of image content blocks
  * compatible with Claude API's image format.
  */
+/**
+ * Sanitize a filename to prevent path traversal and invalid characters.
+ */
+function sanitizeFileName(name: string): string {
+  return name.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 200);
+}
+
+/**
+ * Save a non-image file attachment to the agent workspace.
+ * Returns the saved file path relative to the workspace.
+ */
+function saveFileToWorkspace(params: {
+  b64: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  workspacePath: string;
+}): SavedFileAttachment {
+  const inboundDir = path.join(params.workspacePath, "media", "inbound");
+  fs.mkdirSync(inboundDir, { recursive: true });
+
+  const uniquePrefix = randomUUID().slice(0, 8);
+  const safeName = sanitizeFileName(params.fileName);
+  const destName = `${uniquePrefix}-${safeName}`;
+  const destPath = path.join(inboundDir, destName);
+
+  const buffer = Buffer.from(params.b64, "base64");
+  fs.writeFileSync(destPath, buffer);
+
+  return {
+    filePath: destPath,
+    fileName: params.fileName,
+    mimeType: params.mimeType,
+    sizeBytes: params.sizeBytes,
+  };
+}
+
+/**
+ * Parse attachments and extract images as structured content blocks.
+ * Non-image files are saved to the agent workspace and referenced in the message.
+ * Returns the message text, an array of image content blocks, and saved file references.
+ */
 export async function parseMessageWithAttachments(
   message: string,
   attachments: ChatAttachment[] | undefined,
-  opts?: { maxBytes?: number; log?: AttachmentLog },
+  opts?: { maxBytes?: number; log?: AttachmentLog; workspacePath?: string },
 ): Promise<ParsedMessageWithImages> {
   const maxBytes = opts?.maxBytes ?? 5_000_000; // 5 MB
   const log = opts?.log;
   if (!attachments || attachments.length === 0) {
-    return { message, images: [] };
+    return { message, images: [], files: [] };
   }
 
   const images: ChatImageContent[] = [];
+  const files: SavedFileAttachment[] = [];
 
   for (const [idx, att] of attachments.entries()) {
     if (!att) continue;
@@ -98,28 +152,62 @@ export async function parseMessageWithAttachments(
 
     const providedMime = normalizeMime(mime);
     const sniffedMime = normalizeMime(await sniffMimeFromBase64(b64));
-    if (sniffedMime && !isImageMime(sniffedMime)) {
-      log?.warn(`attachment ${label}: detected non-image (${sniffedMime}), dropping`);
-      continue;
-    }
-    if (!sniffedMime && !isImageMime(providedMime)) {
-      log?.warn(`attachment ${label}: unable to detect image mime type, dropping`);
-      continue;
-    }
-    if (sniffedMime && providedMime && sniffedMime !== providedMime) {
-      log?.warn(
-        `attachment ${label}: mime mismatch (${providedMime} -> ${sniffedMime}), using sniffed`,
-      );
-    }
 
-    images.push({
-      type: "image",
-      data: b64,
-      mimeType: sniffedMime ?? providedMime ?? mime,
-    });
+    // Determine if this is an image
+    const effectiveMime = sniffedMime ?? providedMime ?? mime;
+    const isImage = isImageMime(sniffedMime) || (!sniffedMime && isImageMime(providedMime));
+
+    if (isImage) {
+      if (sniffedMime && providedMime && sniffedMime !== providedMime) {
+        log?.warn(
+          `attachment ${label}: mime mismatch (${providedMime} -> ${sniffedMime}), using sniffed`,
+        );
+      }
+      images.push({
+        type: "image",
+        data: b64,
+        mimeType: effectiveMime,
+      });
+    } else {
+      // Non-image file: save to workspace if path provided
+      if (!opts?.workspacePath) {
+        log?.warn(
+          `attachment ${label}: non-image file (${effectiveMime}), no workspace configured — dropping`,
+        );
+        continue;
+      }
+
+      try {
+        const saved = saveFileToWorkspace({
+          b64,
+          fileName: label,
+          mimeType: effectiveMime,
+          sizeBytes,
+          workspacePath: opts.workspacePath,
+        });
+        files.push(saved);
+        log?.warn(`attachment ${label}: saved non-image file to ${saved.filePath}`);
+      } catch (err) {
+        log?.warn(
+          `attachment ${label}: failed to save file — ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
   }
 
-  return { message, images };
+  // Append file references to the message so the agent knows about them
+  if (files.length > 0) {
+    const fileRefs = files
+      .map(
+        (f) =>
+          `[Attached file: ${f.fileName} (${f.mimeType}, ${f.sizeBytes} bytes) → ${f.filePath}]`,
+      )
+      .join("\n");
+    const separator = message.trim().length > 0 ? "\n\n" : "";
+    message = `${message}${separator}${fileRefs}`;
+  }
+
+  return { message, images, files };
 }
 
 /**

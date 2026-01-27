@@ -101,8 +101,9 @@ export async function sendChatMessage(
           const parsed = dataUrlToBase64(att.dataUrl);
           if (!parsed) return null;
           return {
-            type: "image",
+            type: att.isFile ? "file" : "image",
             mimeType: parsed.mimeType,
+            fileName: att.fileName,
             content: parsed.content,
           };
         })
